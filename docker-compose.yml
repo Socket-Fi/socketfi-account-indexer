@@ -4,9 +4,7 @@ services:
     environment:
       POSTGRES_DB: socketfi_history
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5436:5432"
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - socketfi_history_pg:/var/lib/postgresql/data
     healthcheck:
@@ -14,6 +12,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
+
+  indexer:
+    build: .
+    env_file: .env
+    ports:
+      - "127.0.0.1:4015:4015"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   socketfi_history_pg:
