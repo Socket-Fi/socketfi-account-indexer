@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json prisma/ ./
-RUN npx prisma generate
+RUN ./node_modules/.bin/prisma generate
 COPY src/ ./src/
 RUN npm run build
 
