@@ -18,4 +18,4 @@ COPY prisma/ ./prisma/
 USER node
 EXPOSE 4015
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["sh", "-c", "prisma db push --skip-generate 2>&1 && exec node dist/index.js"]
+CMD ["sh", "-c", "./node_modules/.bin/prisma db push --skip-generate 2>&1 && exec node dist/index.js"]
