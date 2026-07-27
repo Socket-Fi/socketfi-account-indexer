@@ -1,0 +1,147 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Network {
+  TESTNET
+  PUBLIC
+}
+
+enum WalletAuthType {
+  PASSKEY
+  STELLAR
+  EVM
+  BLS
+  HYBRID
+  UNKNOWN
+}
+
+enum TransactionStatus {
+  SUCCESS
+  FAILED
+}
+
+enum ActionType {
+  TRANSFER
+  RECEIVE
+  WITHDRAW
+  DEPOSIT
+  APPROVE
+  SWAP
+  SESSION_CREATE
+  SESSION_REVOKE
+  RECOVERY
+  GUARDIAN
+  PAUSE
+  UNPAUSE
+  CONTRACT_CALL
+  ACCOUNT_CREATE
+  UNKNOWN
+}
+
+model SocketFiWallet {
+  id                   String         @id @default(cuid())
+  network              Network
+  address              String
+  factoryAddress       String
+  authType             WalletAuthType @default(UNKNOWN)
+
+  stellarSignerHex     String?
+  evmSignerHex         String?
+  passkeyHex           String?
+  blsKeyCount          Int            @default(0)
+
+  creationTxHash       String
+  createdAtLedger      BigInt
+  createdAtLedgerTime  DateTime?
+
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  transactions         WalletTransaction[]
+
+  @@unique([network, address])
+  @@index([network, createdAtLedger])
+  @@index([network, creationTxHash])
+}
+
+model TokenMetadata {
+  id             String   @id @default(cuid())
+  network        Network
+  contract       String
+  symbol         String   @default("UNKNOWN")
+  decimals       Int      @default(7)
+  classicCode    String?
+  classicIssuer  String?
+  icon           String?
+  resolved       Boolean  @default(false)
+  lastError      String?
+  lastResolvedAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([network, contract])
+  @@index([network, symbol])
+}
+
+model WalletTransaction {
+  id                    String            @id @default(cuid())
+  network               Network
+  walletId              String
+  walletAddress         String
+  txHash                 String
+  ledger                 BigInt
+  ledgerClosedAt         DateTime?
+  status                 TransactionStatus
+  successful             Boolean
+  actionType             ActionType
+  functionName           String?
+  invokedContract        String?
+  sourceAccount          String?
+  feeChargedStroops      BigInt?
+  operationIndex         Int               @default(0)
+  eventIndex             Int?
+  assetContract          String?
+  assetSymbol            String            @default("UNKNOWN")
+  assetDecimals          Int               @default(7)
+  amountAtomic           String?
+  amount                 Decimal?          @db.Decimal(38, 18)
+  direction              String?
+  fromAddress            String?
+  toAddress              String?
+  counterparty           String?
+  priceUsd               Decimal           @default(0) @db.Decimal(38, 18)
+  valueUsd               Decimal           @default(0) @db.Decimal(38, 18)
+  priceSource            String             @default("DEFAULT_ZERO")
+  memoType                String?
+  memoValue               String?
+  authAddresses           String[]
+  argumentsJson           Json?
+  rawEventJson            Json?
+  rawTransactionJson      Json?
+  indexedAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  wallet                  SocketFiWallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([network, txHash, walletAddress, operationIndex, eventIndex])
+  @@index([network, walletAddress, ledger(sort: Desc)])
+  @@index([network, actionType, ledger(sort: Desc)])
+  @@index([network, assetContract, ledger(sort: Desc)])
+  @@index([network, ledgerClosedAt])
+}
+
+model IndexerCheckpoint {
+  id            String   @id @default(cuid())
+  network       Network  @unique
+  nextLedger    BigInt
+  eventCursor   String?
+  latestSeen    BigInt?
+  lastError     String?
+  lastSuccessAt DateTime?
+  updatedAt     DateTime @updatedAt
+}
