@@ -38,9 +38,9 @@ After=docker.service network-online.target
 Type=oneshot
 RemainAfterExit=true
 WorkingDirectory=$APP_DIR
-ExecStart=$DOCKER_COMPOSE_BIN up -d
+ExecStart=$DOCKER_COMPOSE_BIN up -d --build
 ExecStop=$DOCKER_COMPOSE_BIN down
-ExecReload=$DOCKER_COMPOSE_BIN pull && $DOCKER_COMPOSE_BIN up -d --build
+ExecReload=$DOCKER_COMPOSE_BIN up -d --build
 TimeoutStartSec=0
 
 [Install]
