@@ -27,7 +27,7 @@ async function main() {
     typeof value === "bigint" ? value.toString() : value
   );
   app.use(express.json({ limit: "1mb" }));
-  app.use(pinoHttp({ logger }));
+  app.use((pinoHttp as unknown as (opts: Record<string, unknown>) => express.RequestHandler)({ logger }));
   app.use(routes);
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (error instanceof z.ZodError) {

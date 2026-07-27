@@ -11,7 +11,7 @@ import type { Network } from "../config/env.js";
 import type { ParsedInvocation, RpcTransactionItem } from "./types.js";
 import { normalizeNative } from "../utils/scval.js";
 
-type NormalTransaction = Transaction<unknown>;
+type NormalTransaction = Transaction<any>;
 
 function getInnerTransaction(
   network: Network,
