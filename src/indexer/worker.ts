@@ -537,10 +537,18 @@ async function saveForWallet(
     const amountString = atomic
       ? decimalAmount(atomic, metadata?.decimals ?? 7)
       : undefined;
-    const price = contract
-      ? await priceService.getUsdPrice(network, contract)
-      : { price: 0, source: "DEFAULT_ZERO" };
-    const valueUsd = amountString ? Number(amountString) * price.price : 0;
+    const price =
+      contract && amountString
+        ? await priceService.getUsdPrice(network, contract, amountString)
+        : { price: 0, source: "DEFAULT_ZERO", route: "none" as const };
+
+    const amountDecimal = amountString
+      ? new Prisma.Decimal(amountString).abs()
+      : new Prisma.Decimal(0);
+    const priceDecimal = new Prisma.Decimal(
+      Number.isFinite(price.price) && price.price > 0 ? price.price : 0
+    );
+    const valueUsd = amountDecimal.mul(priceDecimal);
     await prisma.walletTransaction.upsert({
       where: {
         network_txHash_walletAddress_operationIndex_eventIndex: {
@@ -580,8 +588,8 @@ async function saveForWallet(
         fromAddress: parsed.from,
         toAddress: parsed.to,
         counterparty: parsed.counterparty,
-        priceUsd: new Prisma.Decimal(price.price),
-        valueUsd: new Prisma.Decimal(Number.isFinite(valueUsd) ? valueUsd : 0),
+        priceUsd: priceDecimal,
+        valueUsd,
         priceSource: price.source,
         memoType: invocation.memoType,
         memoValue: invocation.memoValue,
@@ -595,8 +603,8 @@ async function saveForWallet(
         successful: tx.status === "SUCCESS",
         assetSymbol: normalizeAssetSymbol(metadata?.symbol),
         assetDecimals: metadata?.decimals ?? 7,
-        priceUsd: new Prisma.Decimal(price.price),
-        valueUsd: new Prisma.Decimal(Number.isFinite(valueUsd) ? valueUsd : 0),
+        priceUsd: priceDecimal,
+        valueUsd,
         priceSource: price.source,
       },
     });
