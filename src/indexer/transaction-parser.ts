@@ -7,22 +7,44 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
+
 import type { Network } from "../config/env.js";
 import type { ParsedInvocation, RpcTransactionItem } from "./types.js";
 import { normalizeNative } from "../utils/scval.js";
 
-type NormalTransaction = Transaction<any>;
+type NormalTransaction = Transaction;
+
+type AddressCredentialsLike = {
+  address(): xdr.ScAddress;
+};
+
+type SorobanCredentialsLike = {
+  switch(): {
+    name: string;
+    value?: number;
+  };
+  address?: () => AddressCredentialsLike;
+  addressV2?: () => AddressCredentialsLike;
+};
+
+function getNetworkPassphrase(network: Network): string {
+  return network === "PUBLIC" ? Networks.PUBLIC : Networks.TESTNET;
+}
 
 function getInnerTransaction(
   network: Network,
   envelopeXdr: string
 ): NormalTransaction {
-  const passphrase = network === "PUBLIC" ? Networks.PUBLIC : Networks.TESTNET;
-  const parsed = TransactionBuilder.fromXDR(envelopeXdr, passphrase);
+  const parsed = TransactionBuilder.fromXDR(
+    envelopeXdr,
+    getNetworkPassphrase(network)
+  );
 
-  return parsed instanceof FeeBumpTransaction
-    ? (parsed.innerTransaction as NormalTransaction)
-    : (parsed as NormalTransaction);
+  if (parsed instanceof FeeBumpTransaction) {
+    return parsed.innerTransaction;
+  }
+
+  return parsed;
 }
 
 function getTransactionXdr(envelopeXdr: string): xdr.Transaction {
@@ -47,32 +69,110 @@ function readMemo(tx: xdr.Transaction): {
   memoValue?: string;
 } {
   const memo = tx.memo();
-  const type = memo.switch().name;
+  const memoType = memo.switch().name;
 
-  if (type === "memoNone") return {};
-  if (type === "memoText") {
-    return {
-      memoType: "text",
-      memoValue: Buffer.from(memo.text()).toString("utf8"),
-    };
+  switch (memoType) {
+    case "memoNone":
+      return {};
+
+    case "memoText":
+      return {
+        memoType: "text",
+        memoValue: Buffer.from(memo.text()).toString("utf8"),
+      };
+
+    case "memoId":
+      return {
+        memoType: "id",
+        memoValue: memo.id().toString(),
+      };
+
+    case "memoHash":
+      return {
+        memoType: "hash",
+        memoValue: Buffer.from(memo.hash()).toString("hex"),
+      };
+
+    case "memoReturn":
+      return {
+        memoType: "return",
+        memoValue: Buffer.from(memo.retHash()).toString("hex"),
+      };
+
+    default:
+      return {};
   }
-  if (type === "memoId") {
-    return { memoType: "id", memoValue: memo.id().toString() };
+}
+
+function scAddressToString(address: xdr.ScAddress): string | undefined {
+  try {
+    return Address.fromScAddress(address).toString();
+  } catch {
+    return undefined;
   }
-  if (type === "memoHash") {
-    return {
-      memoType: "hash",
-      memoValue: Buffer.from(memo.hash()).toString("hex"),
-    };
+}
+
+function readAuthorizationAddress(
+  entry: xdr.SorobanAuthorizationEntry
+): string | undefined {
+  try {
+    const credentials =
+      entry.credentials() as unknown as SorobanCredentialsLike;
+
+    const credentialType = credentials.switch().name;
+
+    /*
+     * Legacy Soroban address credentials:
+     *
+     * SOROBAN_CREDENTIALS_ADDRESS
+     */
+    if (
+      credentialType === "sorobanCredentialsAddress" &&
+      typeof credentials.address === "function"
+    ) {
+      return scAddressToString(credentials.address().address());
+    }
+
+    /*
+     * Protocol 27 / CAP-71 address credentials:
+     *
+     * SOROBAN_CREDENTIALS_ADDRESS_V2
+     *
+     * The generated JavaScript accessor is expected to be addressV2().
+     * The structural runtime check keeps this parser compatible even if
+     * the concrete SDK typings differ between releases.
+     */
+    if (
+      credentialType === "sorobanCredentialsAddressV2" &&
+      typeof credentials.addressV2 === "function"
+    ) {
+      return scAddressToString(credentials.addressV2().address());
+    }
+
+    return undefined;
+  } catch {
+    /*
+     * A malformed, unsupported, or future credential variant must not
+     * stop the entire ledger from being indexed.
+     */
+    return undefined;
   }
-  if (type === "memoReturn") {
-    return {
-      memoType: "return",
-      memoValue: Buffer.from(memo.retHash()).toString("hex"),
-    };
+}
+
+function collectAuthorizationAddresses(
+  entries: xdr.SorobanAuthorizationEntry[]
+): string[] {
+  const addresses = new Set<string>();
+
+  for (const entry of entries) {
+    const address = readAuthorizationAddress(entry);
+
+    if (address) {
+      addresses.add(address);
+    }
   }
 
-  return {};
+  return [...addresses];
 }
 
 export function parseInvocations(
@@ -80,6 +180,7 @@ export function parseInvocations(
   item: RpcTransactionItem
 ): ParsedInvocation[] {
   const innerTransaction = getInnerTransaction(network, item.envelopeXdr);
+
   const tx = getTransactionXdr(item.envelopeXdr);
   const sourceAccount = innerTransaction.source;
   const txMemo = readMemo(tx);
@@ -87,43 +188,34 @@ export function parseInvocations(
 
   tx.operations().forEach((operation, operationIndex) => {
     const body = operation.body();
-    if (body.switch() !== xdr.OperationType.invokeHostFunction()) return;
+
+    if (body.switch() !== xdr.OperationType.invokeHostFunction()) {
+      return;
+    }
 
     const invoke = body.invokeHostFunctionOp();
-    const host = invoke.hostFunction();
+    const hostFunction = invoke.hostFunction();
+
     if (
-      host.switch() !==
+      hostFunction.switch() !==
       xdr.HostFunctionType.hostFunctionTypeInvokeContract()
     ) {
       return;
     }
 
-    const invocation = host.invokeContract();
+    const invocation = hostFunction.invokeContract();
+
     const contractId = Address.fromScAddress(
       invocation.contractAddress()
     ).toString();
+
     const functionName = invocation.functionName().toString();
+
     const args = invocation
       .args()
-      .map((arg) => normalizeNative(scValToNative(arg)));
+      .map((argument) => normalizeNative(scValToNative(argument)));
 
-    const authAddresses = new Set<string>();
-    for (const entry of invoke.auth() || []) {
-      try {
-        if (
-          entry.credentials().switch() ===
-          xdr.SorobanCredentialsType.sorobanCredentialsAddress()
-        ) {
-          authAddresses.add(
-            Address.fromScAddress(
-              entry.credentials().address().address()
-            ).toString()
-          );
-        }
-      } catch {
-        // An unrelated malformed auth entry must not stop ledger ingestion.
-      }
-    }
+    const authAddresses = collectAuthorizationAddresses(invoke.auth() ?? []);
 
     parsed.push({
       operationIndex,
@@ -131,7 +223,7 @@ export function parseInvocations(
       contractId,
       functionName,
       args,
-      authAddresses: [...authAddresses],
+      authAddresses,
       ...txMemo,
     });
   });
