@@ -283,37 +283,77 @@ function movement(event: ParsedEvent, wallet: string) {
   };
 }
 
+const MAX_EVENT_PAGES_PER_LEDGER = 100;
+const MAX_TRANSACTION_PAGES_PER_LEDGER = 100;
+
 async function pagedEvents(
   network: Network,
   startLedger: number,
   endLedger: number
 ): Promise<RpcEvent[]> {
   const all: RpcEvent[] = [];
+  const seenCursors = new Set<string>();
   let cursor: string | undefined;
-  do {
+
+  for (let page = 1; page <= MAX_EVENT_PAGES_PER_LEDGER; page += 1) {
     const result = await rpcCall<RpcEventsResult>(
       network,
       "getEvents",
       cursor
         ? {
             filters: [{ type: "contract" }],
-            pagination: { limit: env.EVENT_PAGE_LIMIT, cursor },
+            pagination: {
+              limit: env.EVENT_PAGE_LIMIT,
+              cursor,
+            },
           }
         : {
             startLedger,
             endLedger,
             filters: [{ type: "contract" }],
-            pagination: { limit: env.EVENT_PAGE_LIMIT },
+            pagination: {
+              limit: env.EVENT_PAGE_LIMIT,
+            },
           }
     );
+
     all.push(...result.events);
-    const next = result.cursor;
-    cursor =
-      next && next !== cursor && result.events.length === env.EVENT_PAGE_LIMIT
-        ? next
-        : undefined;
-  } while (cursor);
-  return all;
+
+    logger.debug(
+      {
+        network,
+        startLedger,
+        endLedger,
+        page,
+        received: result.events.length,
+        total: all.length,
+        cursor: result.cursor,
+      },
+      "event page fetched"
+    );
+
+    const nextCursor = result.cursor;
+    const hasFullPage = result.events.length === env.EVENT_PAGE_LIMIT;
+
+    if (!nextCursor || !hasFullPage) {
+      return all;
+    }
+
+    if (seenCursors.has(nextCursor)) {
+      throw new Error(
+        `${network} RPC repeated event cursor while processing ledgers ` +
+          `${startLedger}-${endLedger}: ${nextCursor}`
+      );
+    }
+
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  throw new Error(
+    `${network} event pagination exceeded ${MAX_EVENT_PAGES_PER_LEDGER} pages ` +
+      `for ledgers ${startLedger}-${endLedger}`
+  );
 }
 
 async function pagedTransactions(
@@ -321,32 +361,83 @@ async function pagedTransactions(
   ledger: number
 ): Promise<RpcTransactionItem[]> {
   const all: RpcTransactionItem[] = [];
+  const seenCursors = new Set<string>();
   let cursor: string | undefined;
-  do {
+
+  for (let page = 1; page <= MAX_TRANSACTION_PAGES_PER_LEDGER; page += 1) {
     const result = await rpcCall<RpcTransactionsResult>(
       network,
       "getTransactions",
       cursor
         ? {
-            pagination: { limit: env.TX_PAGE_LIMIT, cursor },
+            pagination: {
+              limit: env.TX_PAGE_LIMIT,
+              cursor,
+            },
           }
         : {
             startLedger: ledger,
-            pagination: { limit: env.TX_PAGE_LIMIT },
+            pagination: {
+              limit: env.TX_PAGE_LIMIT,
+            },
           }
     );
-    const rows = result.transactions.filter((tx) => tx.ledger === ledger);
+
+    const rows = result.transactions.filter(
+      (transaction) => Number(transaction.ledger) === ledger
+    );
+
     all.push(...rows);
-    if (result.transactions.some((tx) => tx.ledger > ledger)) break;
-    const next = result.cursor;
-    cursor =
-      next &&
-      next !== cursor &&
-      result.transactions.length === env.TX_PAGE_LIMIT
-        ? next
-        : undefined;
-  } while (cursor);
-  return all;
+
+    const reachedLaterLedger = result.transactions.some(
+      (transaction) => Number(transaction.ledger) > ledger
+    );
+
+    const firstTransaction = result.transactions.at(0);
+    const lastTransaction = result.transactions.at(-1);
+
+    logger.info(
+      {
+        network,
+        ledger,
+        page,
+        received: result.transactions.length,
+        retained: rows.length,
+        totalRetained: all.length,
+        firstLedger: firstTransaction ? Number(firstTransaction.ledger) : null,
+        lastLedger: lastTransaction ? Number(lastTransaction.ledger) : null,
+        cursor: result.cursor,
+        reachedLaterLedger,
+      },
+      "transaction page fetched"
+    );
+
+    if (reachedLaterLedger) {
+      return all;
+    }
+
+    const nextCursor = result.cursor;
+    const hasFullPage = result.transactions.length === env.TX_PAGE_LIMIT;
+
+    if (!nextCursor || !hasFullPage) {
+      return all;
+    }
+
+    if (seenCursors.has(nextCursor)) {
+      throw new Error(
+        `${network} RPC repeated transaction cursor while processing ` +
+          `ledger ${ledger}: ${nextCursor}`
+      );
+    }
+
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  throw new Error(
+    `${network} transaction pagination exceeded ` +
+      `${MAX_TRANSACTION_PAGES_PER_LEDGER} pages for ledger ${ledger}`
+  );
 }
 
 // async function ingestFactoryEvents(
@@ -612,39 +703,97 @@ async function saveForWallet(
 }
 
 async function processLedger(network: Network, ledger: number): Promise<void> {
+  logger.info({ network, ledger }, "ledger processing started");
+
   const [rawEvents, transactions] = await Promise.all([
     pagedEvents(network, ledger, ledger + 1),
     pagedTransactions(network, ledger),
   ]);
+
+  logger.info(
+    {
+      network,
+      ledger,
+      rawEvents: rawEvents.length,
+      transactions: transactions.length,
+    },
+    "ledger RPC data fetched"
+  );
+
   const events = rawEvents.map((event, index) =>
     parseEvent(network, event, index)
   );
+
   await ingestFactoryEvents(network, events);
+
   const eventsByTx = new Map<string, ParsedEvent[]>();
-  for (const event of events)
-    eventsByTx.set(event.txHash, [
-      ...(eventsByTx.get(event.txHash) || []),
-      event,
-    ]);
+
+  for (const event of events) {
+    const existing = eventsByTx.get(event.txHash);
+
+    if (existing) {
+      existing.push(event);
+    } else {
+      eventsByTx.set(event.txHash, [event]);
+    }
+  }
+
+  let parsedInvocationCount = 0;
+  let relevantWalletCount = 0;
+  let savedWalletCount = 0;
+  let parseFailureCount = 0;
 
   for (const tx of transactions) {
     let invocations: ParsedInvocation[] = [];
+
     try {
       invocations = parseInvocations(network, tx);
     } catch (error) {
+      parseFailureCount += 1;
+
       logger.warn(
-        { network, ledger, txHash: tx.txHash, err: error },
+        {
+          network,
+          ledger,
+          txHash: tx.txHash,
+          err: error,
+        },
         "unable to parse transaction envelope"
       );
+
       continue;
     }
-    const txEvents = eventsByTx.get(tx.txHash) || [];
+
+    parsedInvocationCount += invocations.length;
+
+    const txEvents = eventsByTx.get(tx.txHash) ?? [];
+
     for (const invocation of invocations) {
       const wallets = relevantWallets(network, invocation, txEvents);
-      for (const wallet of wallets)
+
+      relevantWalletCount += wallets.size;
+
+      for (const wallet of wallets) {
         await saveForWallet(network, wallet, tx, invocation, txEvents);
+
+        savedWalletCount += 1;
+      }
     }
   }
+
+  logger.info(
+    {
+      network,
+      ledger,
+      transactionsSeen: transactions.length,
+      eventsSeen: events.length,
+      parsedInvocations: parsedInvocationCount,
+      relevantWallets: relevantWalletCount,
+      walletSaves: savedWalletCount,
+      parseFailures: parseFailureCount,
+    },
+    "ledger processing completed"
+  );
 }
 
 export class NetworkWorker {
@@ -682,14 +831,18 @@ export class NetworkWorker {
 
   private async tick(): Promise<void> {
     const health = await getHealth(this.network);
+
     let checkpoint = await prisma.indexerCheckpoint.findUnique({
       where: { network: this.network },
     });
+
     if (!checkpoint || checkpoint.nextLedger === 0n) {
       const configured = networkConfig[this.network].startLedger;
+
       const first =
         configured ??
         BigInt(Math.max(health.oldestLedger, health.latestLedger - 10));
+
       checkpoint = await prisma.indexerCheckpoint.upsert({
         where: { network: this.network },
         create: {
@@ -697,14 +850,58 @@ export class NetworkWorker {
           nextLedger: first,
           latestSeen: BigInt(health.latestLedger),
         },
-        update: { nextLedger: first, latestSeen: BigInt(health.latestLedger) },
+        update: {
+          nextLedger: first,
+          latestSeen: BigInt(health.latestLedger),
+        },
       });
+
+      logger.info(
+        {
+          network: this.network,
+          configuredStartLedger: configured?.toString() ?? null,
+          firstLedger: first.toString(),
+          oldestLedger: health.oldestLedger,
+          latestLedger: health.latestLedger,
+        },
+        "indexer checkpoint initialized"
+      );
     }
+
     let next = checkpoint.nextLedger;
     const latest = BigInt(health.latestLedger);
+
+    await prisma.indexerCheckpoint.update({
+      where: { network: this.network },
+      data: {
+        latestSeen: latest,
+      },
+    });
+
+    logger.info(
+      {
+        network: this.network,
+        nextLedger: next.toString(),
+        latestLedger: latest.toString(),
+        behindBy: next <= latest ? (latest - next + 1n).toString() : "0",
+      },
+      "indexer tick started"
+    );
+
     while (!this.stopped && next <= latest) {
-      await processLedger(this.network, Number(next));
+      const ledger = Number(next);
+
+      if (!Number.isSafeInteger(ledger)) {
+        throw new Error(
+          `${this.network} ledger ${next.toString()} exceeds ` +
+            "JavaScript safe integer range"
+        );
+      }
+
+      await processLedger(this.network, ledger);
+
       next += 1n;
+
       await prisma.indexerCheckpoint.update({
         where: { network: this.network },
         data: {
@@ -714,6 +911,16 @@ export class NetworkWorker {
           lastSuccessAt: new Date(),
         },
       });
+
+      logger.info(
+        {
+          network: this.network,
+          processedLedger: ledger,
+          nextLedger: next.toString(),
+          latestLedger: latest.toString(),
+        },
+        "checkpoint advanced"
+      );
     }
   }
 }
