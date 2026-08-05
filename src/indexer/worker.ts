@@ -291,8 +291,9 @@ async function pagedEvents(
   startLedger: number,
   endLedger: number
 ): Promise<RpcEvent[]> {
-  const all: RpcEvent[] = [];
+  const eventsInRange: RpcEvent[] = [];
   const seenCursors = new Set<string>();
+
   let cursor: string | undefined;
 
   for (let page = 1; page <= MAX_EVENT_PAGES_PER_LEDGER; page += 1) {
@@ -317,32 +318,76 @@ async function pagedEvents(
           }
     );
 
-    all.push(...result.events);
+    let reachedEndLedger = false;
+    let retainedOnPage = 0;
 
-    logger.debug(
+    for (const event of result.events) {
+      const eventLedger = Number(event.ledger);
+
+      if (!Number.isFinite(eventLedger)) {
+        logger.warn(
+          {
+            network,
+            startLedger,
+            endLedger,
+            eventLedger: event.ledger,
+          },
+          "event contained an invalid ledger"
+        );
+
+        continue;
+      }
+
+      if (eventLedger >= endLedger) {
+        reachedEndLedger = true;
+        break;
+      }
+
+      if (eventLedger >= startLedger) {
+        eventsInRange.push(event);
+        retainedOnPage += 1;
+      }
+    }
+
+    const firstEvent = result.events.at(0);
+    const lastEvent = result.events.at(-1);
+
+    logger.info(
       {
         network,
         startLedger,
         endLedger,
         page,
         received: result.events.length,
-        total: all.length,
+        retained: retainedOnPage,
+        totalRetained: eventsInRange.length,
+        firstLedger: firstEvent ? Number(firstEvent.ledger) : null,
+        lastLedger: lastEvent ? Number(lastEvent.ledger) : null,
         cursor: result.cursor,
+        reachedEndLedger,
       },
       "event page fetched"
     );
 
-    const nextCursor = result.cursor;
-    const hasFullPage = result.events.length === env.EVENT_PAGE_LIMIT;
+    /*
+     * The cursor may continue beyond the original endLedger because
+     * startLedger and endLedger cannot be included when using a cursor.
+     * Stop as soon as events from endLedger or later appear.
+     */
+    if (reachedEndLedger) {
+      return eventsInRange;
+    }
 
-    if (!nextCursor || !hasFullPage) {
-      return all;
+    const nextCursor = result.cursor;
+
+    if (!nextCursor || result.events.length < env.EVENT_PAGE_LIMIT) {
+      return eventsInRange;
     }
 
     if (seenCursors.has(nextCursor)) {
       throw new Error(
-        `${network} RPC repeated event cursor while processing ledgers ` +
-          `${startLedger}-${endLedger}: ${nextCursor}`
+        `${network} RPC repeated event cursor while processing ` +
+          `ledgers ${startLedger}-${endLedger}: ${nextCursor}`
       );
     }
 
@@ -351,8 +396,9 @@ async function pagedEvents(
   }
 
   throw new Error(
-    `${network} event pagination exceeded ${MAX_EVENT_PAGES_PER_LEDGER} pages ` +
-      `for ledgers ${startLedger}-${endLedger}`
+    `${network} event pagination exceeded ` +
+      `${MAX_EVENT_PAGES_PER_LEDGER} pages for ` +
+      `ledgers ${startLedger}-${endLedger}`
   );
 }
 
