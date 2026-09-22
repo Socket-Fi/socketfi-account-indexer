@@ -12,6 +12,7 @@ const schema = z.object({
     }
     return keys;
   }),
+  INDEXER_ADMIN_API_KEY: z.string().min(16).optional(),
   TESTNET_RPC_URL: z.string().url(),
   PUBLIC_RPC_URL: z.string().url(),
   TESTNET_HORIZON_URL: z.string().url().default("https://horizon-testnet.stellar.org"),

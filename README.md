@@ -82,7 +82,9 @@ No contract change is required.
 
 ## App API-key authentication
 
-All `/v1` routes require one of the comma-separated secrets configured in `APP_API_KEYS`.
+Application `/v1` routes require one of the comma-separated secrets configured
+in `APP_API_KEYS`. The administrative wallet-registration route uses the
+separate `INDEXER_ADMIN_API_KEY` described below.
 `/health` remains unauthenticated for infrastructure health checks.
 
 Send the key using either header:
@@ -104,6 +106,28 @@ APP_API_KEYS=current-secret,next-secret
 ```
 
 Do not bundle this secret into a public browser application. A browser cannot keep an API key secret. Call this service through your own authenticated application backend or server-side API route.
+
+### Registering wallets without historical backfill
+
+When the factory contract changes, an administrator can register newly created
+wallets without scanning from the beginning of the network. Set a separate
+`INDEXER_ADMIN_API_KEY` and submit a bounded list of contract addresses:
+
+```http
+POST /v1/admin/wallets
+X-Indexer-Admin-Key: your-admin-key
+Content-Type: application/json
+
+{
+  "network": "TESTNET",
+  "wallets": ["C..."]
+}
+```
+
+The endpoint validates each Soroban contract address, skips wallets already
+registered for that network, and adds new wallets to the live registry and
+database. It does not fabricate historical transactions or replay old ledgers;
+only activity observed after registration is indexed.
 
 ## Wallet transaction history
 

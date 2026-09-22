@@ -48,3 +48,17 @@ export function requireAppApiKey(req: Request, res: Response, next: NextFunction
 
   next();
 }
+
+export function requireIndexerAdminKey(req: Request, res: Response, next: NextFunction): void {
+  const configured = env.INDEXER_ADMIN_API_KEY;
+  const supplied = req.header("x-indexer-admin-key")?.trim();
+  if (!configured || !supplied) {
+    res.status(404).json({ success: false, error: "Not found.", code: "NOT_FOUND" });
+    return;
+  }
+  if (!timingSafeEqual(digest(configured), digest(supplied))) {
+    res.status(401).json({ success: false, error: "Invalid admin key.", code: "ADMIN_KEY_INVALID" });
+    return;
+  }
+  next();
+}

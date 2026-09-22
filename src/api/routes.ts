@@ -2,9 +2,12 @@ import { Buffer } from "node:buffer";
 import { ActionType, Prisma, TransactionStatus } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { StrKey } from "@stellar/stellar-sdk";
+import { networkConfig } from "../config/env.js";
 import { prisma } from "../db/prisma.js";
 import { tokenMetadataService } from "../services/token-metadata.js";
-import { requireAppApiKey } from "./auth.js";
+import { walletRegistry } from "../services/wallet-registry.js";
+import { requireAppApiKey, requireIndexerAdminKey } from "./auth.js";
 
 const router = Router();
 const networkSchema = z.enum(["TESTNET", "PUBLIC"]);
@@ -88,6 +91,56 @@ router.get("/health", async (_req, res, next) => {
       success: true,
       status: checkpoints.every((item) => !item.lastError) ? "healthy" : "degraded",
       checkpoints,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Register wallets created before the indexer was pointed at the current
+// factory. This seeds only the wallet registry; it does not replay old ledgers
+// or fabricate historical transactions.
+router.post("/v1/admin/wallets", requireIndexerAdminKey, async (req, res, next) => {
+  try {
+    const body = z.object({
+      network: networkSchema,
+      wallets: z.array(z.string().trim()).min(1).max(1000),
+    }).superRefine((value, context) => {
+      value.wallets.forEach((address, index) => {
+        if (!StrKey.isValidContract(address)) {
+          context.addIssue({ code: z.ZodIssueCode.custom, path: ["wallets", index], message: "Invalid Soroban contract address." });
+        }
+      });
+    }).parse(req.body);
+    const addresses = [...new Set(body.wallets)];
+    const existing = await prisma.socketFiWallet.findMany({
+      where: { network: body.network, address: { in: addresses } },
+      select: { address: true },
+    });
+    const existingSet = new Set(existing.map((row) => row.address));
+    const added: string[] = [];
+    for (const address of addresses) {
+      if (existingSet.has(address)) continue;
+      await walletRegistry.add({
+        network: body.network,
+        address,
+        factoryAddress: networkConfig[body.network].factoryContractId,
+        authType: "UNKNOWN",
+        stellarSignerHex: null,
+        evmSignerHex: null,
+        passkeyHex: null,
+        blsKeyCount: 0,
+        creationTxHash: `manual:${body.network}:${address}`,
+        createdAtLedger: 0n,
+        createdAtLedgerTime: null,
+      });
+      added.push(address);
+    }
+    res.json({
+      success: true,
+      network: body.network,
+      added,
+      skipped: addresses.filter((address) => existingSet.has(address)),
     });
   } catch (error) {
     next(error);
